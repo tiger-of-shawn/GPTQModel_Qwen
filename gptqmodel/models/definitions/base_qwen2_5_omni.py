@@ -24,7 +24,7 @@ from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, move_to
 from .._const import CPU
 from ..base import BaseGPTQModel
-
+from qwen_omni_utils import process_mm_info
 
 class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
     loader = AutoModelForTextToWaveform
@@ -102,19 +102,13 @@ class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
 
     def prepare_dataset(self, calibration_dataset, calibration_dataset_concat_size=None, batch_size: int = 1):
         processor = self.load_processor()
+        
         calib_data = []
         for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
-            text = processor.apply_chat_template(
-                batch, tokenize=False, add_generation_prompt=True
-            )
-            image_inputs = self.process_vision_info(batch)
-            inputs = processor(
-                text=text,
-                images=image_inputs,
-                videos=None,
-                padding=True,
-                return_tensors="pt",
-            )
+            text = processor.apply_chat_template(batch, tokenize=False, add_generation_prompt=True)
+            audios, images, videos = process_mm_info(batch, use_audio_in_video=False)
+            inputs = processor(text=text, images=images, videos=videos, audio=audios, padding=True, return_tensors="pt")
+            
             calib_data.append(inputs)
         del processor
         return calib_data
