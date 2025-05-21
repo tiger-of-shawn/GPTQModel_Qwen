@@ -121,7 +121,8 @@ class ModuleLooper():
                     example[k] = move_to(v, device=data_device)
             try:
                 if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
-                    self.gptq_model.model.generate(**example, return_audio=False)
+                    self.gptq_model.model.generate(**example, return_audio=True)
+                    
                 else:
                     self.gptq_model.model(**example)
             except ValueError:
