@@ -224,7 +224,6 @@ class ModuleLooper():
 
             for layer_index in quant_modules_pb:
                 is_lm_head_module = layer_index >= layer_count
-
                 if is_lm_head_module:
                     quant_modules_pb.title("Quantizing lm_head").draw()
                     module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)

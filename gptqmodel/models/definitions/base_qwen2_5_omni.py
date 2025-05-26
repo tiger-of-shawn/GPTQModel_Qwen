@@ -29,7 +29,9 @@ from qwen_omni_utils import process_mm_info
 class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
     loader = AutoModelForTextToWaveform
 
-    base_modules = ["talker.model.embed_tokens", "talker.model.norm"]
+    #
+    base_modules = ["thinker.model.embed_tokens", "thinker.model.norm", "talker.model.embed_tokens", "talker.model.norm"]
+    # lm_head is not quantized
     pre_lm_head_norm_module = "talker.model.norm"
 
     layers_node = ["thinker.model.layers", "talker.model.layers"]
