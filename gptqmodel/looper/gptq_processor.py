@@ -133,7 +133,7 @@ class GPTQProcessor(LoopProcessor):
     def process(self, module: NamedModule, auto_gc: bool = True):
         # Reset peak memory stats
         #torch.cuda.reset_peak_memory_stats()
-        self.pb.title(f"Quantizing {module.name} in layer ").draw()
+        self.pb.title(f"Quantizing {module.full_name} in layer ").draw()
 
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading

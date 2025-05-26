@@ -164,380 +164,387 @@ class ModuleLooper():
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
-        layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
-
-        for p_index, processor in enumerate(self.processors):
-            if not processor.verify_calibration_dataset(p_index):
-                if isinstance(processor, EoraProcessor) or\
-                        (isinstance(processor, GPTQProcessor) and self.gptq_model.quantize_config.v2):
-                    prev_processor = self.processors[p_index - 1]
-                    processor.set_calibration_dataset(prev_processor.calibration_dataset)
-                    # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
-                    processor.receive_input_cache(copy.copy(prev_processor.inputs_cache))
-                elif isinstance(processor, DequantizeProcessor):
-                    # DequantizeProcessor does not perform any operations on dataset.
-                    processor.set_calibration_dataset([])
-                    processor.receive_input_cache(InputCache([], [], [], []))
-
-                continue
-
-            input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
-                                            calibration_data=processor.calibration_dataset,
-                                            calibration_enable_gpu_cache=calibration_enable_gpu_cache)
-            processor.receive_input_cache(input_cache)
-
-        # release calibration_dataset
-        for processor in self.processors:
-            processor.release_calibration_dataset()
-
-        layer_modules = self.gptq_model.layer_modules
-
-        if not self.gptq_model.quantize_config.true_sequential:
-            layer_modules = [sum(layer_modules, [])]
-
-        # dynamic expert layer index for model defs
-        if self.gptq_model.dynamic_expert_index is not None:
-            num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
-            layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
-                                                  num_experts=num_experts)
-
-        layer_count = len(layers)
-        quant_modules_pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
-                            .manual()
-                            .set(left_steps_offset=1))
-
-        for processor in self.processors:
-            processor.layer_count = layer_count
-            processor.pb = quant_modules_pb
-
-        shared_kv_cache_dict = {}
-
-        # replace quantizable modules with hooked version
-        if self.gptq_model.layers_modules_tree:
-            replace_module_with_hooked_tree(self.gptq_model.model, self.gptq_model.layers_modules_tree, debug=False)
-        else:
-            replace_module_with_hooked_legacy(self.gptq_model.model)
-
-        for layer_index in quant_modules_pb:
-            is_lm_head_module = layer_index >= layer_count
-
-            if is_lm_head_module:
-                quant_modules_pb.title("Quantizing lm_head").draw()
-                module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-                layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
-            else:
-                quant_modules_pb.title(f"Quantizing layer {layer_index} of {layer_count - 1}").draw()
-                module = layers[layer_index]
-
-            if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
-                # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
-                continue
-
-            self.gptq_model.pre_quantize(module)
-
-            cur_layer_device = get_device(module)
-            full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
-
+        
+        module_index = 0
+        module_count = len(self.gptq_model.layers_node)
+        for layers_node in self.gptq_model.layers_node:
+            layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, layers_node)
             for p_index, processor in enumerate(self.processors):
-                processor.log_call_count = 0 # reset
-                processor.collect_memory_info(layer_index)
+                if not processor.verify_calibration_dataset(p_index):
+                    if isinstance(processor, EoraProcessor) or\
+                            (isinstance(processor, GPTQProcessor) and self.gptq_model.quantize_config.v2):
+                        prev_processor = self.processors[p_index - 1]
+                        processor.set_calibration_dataset(prev_processor.calibration_dataset)
+                        # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
+                        processor.receive_input_cache(copy.copy(prev_processor.inputs_cache))
+                    elif isinstance(processor, DequantizeProcessor):
+                        # DequantizeProcessor does not perform any operations on dataset.
+                        processor.set_calibration_dataset([])
+                        processor.receive_input_cache(InputCache([], [], [], []))
 
-                layer_inputs = processor.inputs_cache.layer_inputs
-                layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
-                position_ids = processor.inputs_cache.position_ids
-                attention_masks = processor.inputs_cache.attention_masks
+                    continue
 
-                processed_subset = {}
+                input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
+                                                calibration_data=processor.calibration_dataset,
+                                                calibration_enable_gpu_cache=calibration_enable_gpu_cache)
+                processor.receive_input_cache(input_cache)
 
-                modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
+            # release calibration_dataset
+            for processor in self.processors:
+                if module_index == (module_count - 1):
+                    processor.release_calibration_dataset()
 
-                # for NativeProcessor we process one time forward on all grouped module subsets
-                if processor.fwd_all_modules_in_single_pass:
-                    # merge all subsets into one
-                    modules = [sum(modules, [])]
+            layer_modules = self.gptq_model.layer_modules
 
-                for index, names in enumerate(modules):
-                    subset = {}
-                    for n in names:
-                        if n in full:
-                            subset[n] = full[n]
-                        # some modules have layer_modules that are dynamic based on config
-                        # ref: deepseek v2/v3/r1
-                        elif self.gptq_model.layer_modules_strict:
-                            raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
+            if not self.gptq_model.quantize_config.true_sequential:
+                layer_modules = [sum(layer_modules, [])]
 
-                    skipped_modules = []
+            # dynamic expert layer index for model defs
+            if self.gptq_model.dynamic_expert_index is not None:
+                num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
+                layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
+                                                    num_experts=num_experts)
 
-                    for name in subset:
-                        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
+            layer_count = len(layers)
+            quant_modules_pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
+                                .manual()
+                                .set(left_steps_offset=1))
 
-                        # gptq task is created and stored inside processor
-                        if not isinstance(subset[name], NamedModule):
-                            named_module = NamedModule(subset[name], name=name, full_name=layer_name,
-                                                      layer_index=layer_index)
-                            if isinstance(processor, EoraProcessor):
-                                named_module.state.update({
-                                    "wq": processor.quantized_weights[layer_name],
-                                })
-                                # TODO processor.release_quantized_weights()
+            for processor in self.processors:
+                processor.layer_count = layer_count
+                processor.pb = quant_modules_pb
 
-                            subset[name] = named_module
-                            full[name] = named_module
+            shared_kv_cache_dict = {}
 
-                        processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
-                        # some modules are skipped
-                        if processor.is_skipped(subset[name]):
-                            skipped_modules.append(name)
+            # replace quantizable modules with hooked version
+            if self.gptq_model.layers_modules_tree:
+                replace_module_with_hooked_tree(self.gptq_model.model, self.gptq_model.layers_modules_tree[module_index], debug=False)
+            else:
+                replace_module_with_hooked_legacy(self.gptq_model.model)
 
-                    for name in skipped_modules:
-                        subset.pop(name)
+            for layer_index in quant_modules_pb:
+                is_lm_head_module = layer_index >= layer_count
 
-                    if len(subset) == 0:
-                        continue
+                if is_lm_head_module:
+                    quant_modules_pb.title("Quantizing lm_head").draw()
+                    module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+                    layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
+                else:
+                    quant_modules_pb.title(f"Quantizing layer {layer_index} of {layer_count - 1}").draw()
+                    module = layers[layer_index]
 
-                    handle = []
-                    # log.info(f"Subset = {subset}")
-                    device_next_reset()
+                if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
+                    # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
+                    continue
 
-                    for name in subset:
-                        m = subset[name]
-                        m.module.target_device, m.module.target_device_stream = device_next()
-                        # log.info(f"Loop name = {name}")
-                        if hasattr(subset[name], 'forward_hook'):
-                            subset[name].forward_hook = processor.pre_process_fwd_hook(name)
-                        else:
-                            # TODO FIXME: do we even need to hook into modules that are not quantizable?
-                            assert (f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
-                            handle.append(subset[name].register_forward_hook(processor.pre_process_fwd_hook(name)))
+                self.gptq_model.pre_quantize(module)
 
-                    # ---- Start Pre-Quantized Forward ----
-                    # logger.info(f"layer-{i}: Begin Forward() Pass")
-                    fwd_start = time.time()
+                cur_layer_device = get_device(module)
+                full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
 
-                    layer_outputs = []
-                    for j in range(processor.num_batches):
-                        layer_input = []
-                        # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
-                        for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, device=cur_layer_device, stream=False))
+                for p_index, processor in enumerate(self.processors):
+                    processor.log_call_count = 0 # reset
+                    processor.collect_memory_info(layer_index)
 
-                        mask = attention_masks[j]
-                        layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device, stream=False)
+                    layer_inputs = processor.inputs_cache.layer_inputs
+                    layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
+                    position_ids = processor.inputs_cache.position_ids
+                    attention_masks = processor.inputs_cache.attention_masks
 
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-                        layer_position_ids = (
-                            None if not position_ids else move_to(position_ids[j], device=cur_layer_device, stream=False)
-                        )
+                    processed_subset = {}
 
-                        if layer_position_ids is not None:
-                            additional_layer_inputs["position_ids"] = layer_position_ids
-                        for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=False)
+                    modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
-                        # sync above stream copies
-                        #torch_sync(device=cur_layer_device)
+                    # for NativeProcessor we process one time forward on all grouped module subsets
+                    if processor.fwd_all_modules_in_single_pass:
+                        # merge all subsets into one
+                        modules = [sum(modules, [])]
 
-                        # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                        if hasattr(module, "reuse_kv"):
-                            if module.reuse_kv:
-                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
-                                    layer_index - 1)
+                    for index, names in enumerate(modules):
+                        subset = {}
+                        for n in names:
+                            if n in full:
+                                subset[n] = full[n]
+                            # some modules have layer_modules that are dynamic based on config
+                            # ref: deepseek v2/v3/r1
+                            elif self.gptq_model.layer_modules_strict:
+                                import pdb;pdb.set_trace()
+                                raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
 
-                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
-                                                                                                 **additional_layer_inputs)
-                            if shared_kv_cache_dict.get(layer_index) is None:
-                                shared_kv_cache_dict[layer_index] = layer_output[-1]
-                        else:
-                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
-                                                                                  **additional_layer_inputs)
-                        # For Native processor, we can update processor input here
-                        # if second forward is not required, this/first forward output is captured as input for next loop
-                        if not processor.fwd_after_process:
-                            layer_outputs.append([layer_output[0]])
+                        skipped_modules = []
 
-                        del layer_input
-                        del additional_layer_inputs
+                        for name in subset:
+                            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
 
-                    # Native processor does not need to run a second forward pass, the output of the first pass is
-                    # directly saved and used as input for the next loop.
-                    if not processor.fwd_after_process:
-                        processor.receive_layer_inputs(layer_outputs)
-                        del layer_outputs
+                            # gptq task is created and stored inside processor
+                            if not isinstance(subset[name], NamedModule):
+                                named_module = NamedModule(subset[name], name=name, full_name=layer_name,
+                                                        layer_index=layer_index)
+                                if isinstance(processor, EoraProcessor):
+                                    named_module.state.update({
+                                        "wq": processor.quantized_weights[layer_name],
+                                    })
+                                    # TODO processor.release_quantized_weights()
 
-                    fwd_end = time.time()
-                    fwd_time = fwd_end - fwd_start
+                                subset[name] = named_module
+                                full[name] = named_module
 
-                    processor.set_fwd_time(fwd_time)
+                            processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
+                            # some modules are skipped
+                            if processor.is_skipped(subset[name]):
+                                skipped_modules.append(name)
 
-                    for h in handle:
-                        h.remove()
-
-                    for name in subset:
-                        if hasattr(subset[name], 'forward_hook'):
-                            subset[name].forward_hook = None
-
-
-                    # TODO FIXME: MoE modules forward() may not trigger if dataset is too small
-                    # and moe gating logic does not trigger some moes
-                    if isinstance(processor, GPTQProcessor):
-                        moe_skip_modules = []
-                        for name in subset :
-                            if processor.tasks[name].fwd_counter == 0:
-                                log.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
-                                moe_skip_modules.append(name)
-
-                        for name in moe_skip_modules:
+                        for name in skipped_modules:
                             subset.pop(name)
-                    # ---- END Pre-Quantized Forward ----
 
-                    # ---- Start Proceess Hook ----
-                    if len(ALL_DEVICES) <= 1:
-                        for name_index, name in enumerate(subset):
+                        if len(subset) == 0:
+                            continue
+
+                        handle = []
+                        # log.info(f"Subset = {subset}")
+                        device_next_reset()
+
+                        for name in subset:
                             m = subset[name]
-                            processor.process(module=m, auto_gc=auto_gc)
-                            processed_subset[name] = m
-                    else:
-                        # TODO: there are threading/sync issues with streaming transfers
-                        # for name in subset:
-                        #     m = subset[name]
-                        #     processor.pre_process_streaming(module=m)
-                        #
-                        # torch_sync()
+                            m.module.target_device, m.module.target_device_stream = device_next()
+                            # log.info(f"Loop name = {name}")
+                            if hasattr(subset[name], 'forward_hook'):
+                                subset[name].forward_hook = processor.pre_process_fwd_hook(name)
+                            else:
+                                # TODO FIXME: do we even need to hook into modules that are not quantizable?
+                                assert (f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
+                                handle.append(subset[name].register_forward_hook(processor.pre_process_fwd_hook(name)))
 
-                        # set to number of devices
-                        max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
-                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                            futures = []
-                            def process_module(name, m):
-                                processor.process(module=m, auto_gc=auto_gc)
-                                return name, m
+                        # ---- Start Pre-Quantized Forward ----
+                        # logger.info(f"layer-{i}: Begin Forward() Pass")
+                        fwd_start = time.time()
 
-                            for name in subset:
+                        layer_outputs = []
+                        for j in range(processor.num_batches):
+                            layer_input = []
+                            # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
+                            for k, layer_inp in enumerate(layer_inputs[j]):
+                                layer_input.append(move_to(layer_inp, device=cur_layer_device, stream=False))
+
+                            mask = attention_masks[j]
+                            layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device, stream=False)
+
+                            additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
+                            layer_position_ids = (
+                                None if not position_ids else move_to(position_ids[j], device=cur_layer_device, stream=False)
+                            )
+
+                            if layer_position_ids is not None:
+                                additional_layer_inputs["position_ids"] = layer_position_ids
+                            for k, v in layer_input_kwargs[j].items():
+                                additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=False)
+
+                            # sync above stream copies
+                            #torch_sync(device=cur_layer_device)
+
+                            # reuse_kv is a flag to reuse the kv cache, only for the hamba model
+                            if hasattr(module, "reuse_kv"):
+                                if module.reuse_kv:
+                                    additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
+                                        layer_index - 1)
+
+                                layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
+                                                                                                    **additional_layer_inputs)
+                                if shared_kv_cache_dict.get(layer_index) is None:
+                                    shared_kv_cache_dict[layer_index] = layer_output[-1]
+                            else:
+                                layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
+                                                                                    **additional_layer_inputs)
+                            # For Native processor, we can update processor input here
+                            # if second forward is not required, this/first forward output is captured as input for next loop
+                            if not processor.fwd_after_process:
+                                layer_outputs.append([layer_output[0]])
+
+                            del layer_input
+                            del additional_layer_inputs
+
+                        # Native processor does not need to run a second forward pass, the output of the first pass is
+                        # directly saved and used as input for the next loop.
+                        if not processor.fwd_after_process:
+                            processor.receive_layer_inputs(layer_outputs)
+                            del layer_outputs
+
+                        fwd_end = time.time()
+                        fwd_time = fwd_end - fwd_start
+
+                        processor.set_fwd_time(fwd_time)
+
+                        for h in handle:
+                            h.remove()
+
+                        for name in subset:
+                            if hasattr(subset[name], 'forward_hook'):
+                                subset[name].forward_hook = None
+
+
+                        # TODO FIXME: MoE modules forward() may not trigger if dataset is too small
+                        # and moe gating logic does not trigger some moes
+                        if isinstance(processor, GPTQProcessor):
+                            moe_skip_modules = []
+                            for name in subset :
+                                if processor.tasks[name].fwd_counter == 0:
+                                    log.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
+                                    moe_skip_modules.append(name)
+
+                            for name in moe_skip_modules:
+                                subset.pop(name)
+                        # ---- END Pre-Quantized Forward ----
+
+                        # ---- Start Proceess Hook ----
+                        if len(ALL_DEVICES) <= 1:
+                            for name_index, name in enumerate(subset):
                                 m = subset[name]
-                                futures.append(executor.submit(
-                                    process_module,
-                                    name,
-                                    m
-                                ))
-
-                            for future in futures:
-                                name, m = future.result()
+                                processor.process(module=m, auto_gc=auto_gc)
                                 processed_subset[name] = m
+                        else:
+                            # TODO: there are threading/sync issues with streaming transfers
+                            # for name in subset:
+                            #     m = subset[name]
+                            #     processor.pre_process_streaming(module=m)
+                            #
+                            # torch_sync()
 
-                        torch_sync()
-                    # ---- End Process Hook ----
+                            # set to number of devices
+                            max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
+                            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                                futures = []
+                                def process_module(name, m):
+                                    processor.process(module=m, auto_gc=auto_gc)
+                                    return name, m
 
-                    if index == len(modules) - 1:
-                        if auto_gc:
-                            torch_empty_cache()
+                                for name in subset:
+                                    m = subset[name]
+                                    futures.append(executor.submit(
+                                        process_module,
+                                        name,
+                                        m
+                                    ))
 
-                is_last_module = layer_index == len(quant_modules_pb) - 1
-                # Native processor does not need second forward pass after layer quantization
-                # this is the second forward after process()
-                if not is_last_module and processor.fwd_after_process:
-                    layer_outputs = []
-                    for j in range(processor.num_batches):
-                        # assert weight
-                        # if isinstance(processor, EoraProcessor):
-                        #     for names in modules:
-                        #         if n in names:
-                        #             assert torch.equal(full[n].weight.data.cpu(), processed_subset[n].state["wq_ab"])
-                        #             assert not torch.equal(full[n].weight.data.cpu(), processed_subset[n].state["wq"])
-                        #             assert not torch.equal(processed_subset[n].state["wq_ab"], processed_subset[n].state["wq"])
-                        #             full[n].weight.data.cuda()
+                                for future in futures:
+                                    name, m = future.result()
+                                    processed_subset[name] = m
 
-                        layer_input = []
-                        for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, device=cur_layer_device))
+                            torch_sync()
+                        # ---- End Process Hook ----
 
-                        mask = attention_masks[j]
-                        layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
-
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-
-                        layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
-                        if layer_position_ids is not None:
-                            additional_layer_inputs["position_ids"] = layer_position_ids
-
-                        for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
-
-                        if hasattr(module, "reuse_kv"):
-                            if module.reuse_kv:
-                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
-
-                        # log.info(f"MODULE Last forward: {module}")
-                        layer_output = move_to(
-                            module(*layer_input)[0] if is_lm_head_module else
-                            module(*layer_input, **additional_layer_inputs)[0],
-                            device=cur_layer_device if calibration_enable_gpu_cache else CPU,
-                            # stream=True,
-                        )
-
-                        layer_outputs.append([layer_output])
-
-                        del layer_input
-                        del additional_layer_inputs
-                        if processor.num_batches > 1 and j == processor.num_batches - 1:
+                        if index == len(modules) - 1:
                             if auto_gc:
                                 torch_empty_cache()
 
-                # TODO move to processor?
-                if p_index == len(self.processors) - 1:
-                    torch_sync()
+                    is_last_module = layer_index == len(quant_modules_pb) - 1
+                    # Native processor does not need second forward pass after layer quantization
+                    # this is the second forward after process()
+                    if not is_last_module and processor.fwd_after_process:
+                        layer_outputs = []
+                        for j in range(processor.num_batches):
+                            # assert weight
+                            # if isinstance(processor, EoraProcessor):
+                            #     for names in modules:
+                            #         if n in names:
+                            #             assert torch.equal(full[n].weight.data.cpu(), processed_subset[n].state["wq_ab"])
+                            #             assert not torch.equal(full[n].weight.data.cpu(), processed_subset[n].state["wq"])
+                            #             assert not torch.equal(processed_subset[n].state["wq_ab"], processed_subset[n].state["wq"])
+                            #             full[n].weight.data.cuda()
 
-                    if not is_lm_head_module:
-                        layers[layer_index] = self.gptq_model.post_quantize(module)
-                    else:
-                        self.gptq_model.post_quantize(module)
+                            layer_input = []
+                            for k, layer_inp in enumerate(layer_inputs[j]):
+                                layer_input.append(move_to(layer_inp, device=cur_layer_device))
 
-                # This is second forward outputs captured for input of next loop
-                # Native processor does not need second forward and already captured output from first forward
-                if processor.fwd_after_process:
-                    processor.clear_cache_data()
-                    processor.receive_layer_inputs(layer_outputs)
+                            mask = attention_masks[j]
+                            layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
 
-                # if last processor, we need to call finalize in reverse
-                if p_index == len(self.processors) - 1:
-                    torch_sync()
+                            additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
 
-                    for reverse_p in reversed(self.processors):
-                        for name in processed_subset:
-                            reverse_p.submodule_finalize(processed_subset[name])
-                    del module
+                            layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
+                            if layer_position_ids is not None:
+                                additional_layer_inputs["position_ids"] = layer_position_ids
 
-                if auto_gc:
-                    torch_empty_cache()
+                            for k, v in layer_input_kwargs[j].items():
+                                additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
 
-        total_log = {}
+                            if hasattr(module, "reuse_kv"):
+                                if module.reuse_kv:
+                                    additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
 
-        for reverse_p in reversed(self.processors):
-            if isinstance(reverse_p, GPTQProcessor):
-                pass
-                #logger.info(f"Quantization summary:\n{reverse_p.log}")
-            elif isinstance(reverse_p, EoraProcessor):
-                pass
-                #logger.info(f"Eora summary:\n{reverse_p.log}")
-            elif isinstance(reverse_p, DequantizeProcessor):
-                # ignore log
-                pass
-            else:
-                log.info(f"{reverse_p.name()} summary:\n{reverse_p.log}")
+                            # log.info(f"MODULE Last forward: {module}")
+                            layer_output = move_to(
+                                module(*layer_input)[0] if is_lm_head_module else
+                                module(*layer_input, **additional_layer_inputs)[0],
+                                device=cur_layer_device if calibration_enable_gpu_cache else CPU,
+                                # stream=True,
+                            )
 
-            processor_name = reverse_p.name()
-            total_log[processor_name] = reverse_p.log
-            if processor_name in ["gptq", "gptq v2"]:
-                self.gptq_model.quant_log = reverse_p.log
+                            layer_outputs.append([layer_output])
 
-            for module_log in reverse_p.log:
-                log.info(module_log)
-            reverse_p.log_plotly()
+                            del layer_input
+                            del additional_layer_inputs
+                            if processor.num_batches > 1 and j == processor.num_batches - 1:
+                                if auto_gc:
+                                    torch_empty_cache()
 
-            reverse_p.finalize(model=self.gptq_model, **kwargs)
+                    # TODO move to processor?
+                    if p_index == len(self.processors) - 1:
+                        torch_sync()
 
-        self.gptq_model.model.config.use_cache = forward_pass_use_cache
+                        if not is_lm_head_module:
+                            layers[layer_index] = self.gptq_model.post_quantize(module)
+                        else:
+                            self.gptq_model.post_quantize(module)
 
-        if auto_gc:
-            torch_empty_cache()
+                    # This is second forward outputs captured for input of next loop
+                    # Native processor does not need second forward and already captured output from first forward
+                    if processor.fwd_after_process:
+                        processor.clear_cache_data()
+                        processor.receive_layer_inputs(layer_outputs)
 
+                    # if last processor, we need to call finalize in reverse
+                    if p_index == len(self.processors) - 1:
+                        torch_sync()
+
+                        for reverse_p in reversed(self.processors):
+                            for name in processed_subset:
+                                reverse_p.submodule_finalize(processed_subset[name])
+                        del module
+
+                    if auto_gc:
+                        torch_empty_cache()
+
+            total_log = {}
+
+            for reverse_p in reversed(self.processors):
+                if isinstance(reverse_p, GPTQProcessor):
+                    pass
+                    #logger.info(f"Quantization summary:\n{reverse_p.log}")
+                elif isinstance(reverse_p, EoraProcessor):
+                    pass
+                    #logger.info(f"Eora summary:\n{reverse_p.log}")
+                elif isinstance(reverse_p, DequantizeProcessor):
+                    # ignore log
+                    pass
+                else:
+                    log.info(f"{reverse_p.name()} summary:\n{reverse_p.log}")
+
+                processor_name = reverse_p.name()
+                total_log[processor_name] = reverse_p.log
+                if processor_name in ["gptq", "gptq v2"]:
+                    self.gptq_model.quant_log = reverse_p.log
+
+                for module_log in reverse_p.log:
+                    log.info(module_log)
+                reverse_p.log_plotly()
+
+                if module_index == 1:
+                    reverse_p.finalize(model=self.gptq_model, **kwargs)
+
+            self.gptq_model.model.config.use_cache = forward_pass_use_cache
+
+            if auto_gc:
+                torch_empty_cache()
+
+            module_index = module_index + 1
         return total_log
