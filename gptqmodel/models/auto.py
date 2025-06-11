@@ -224,6 +224,7 @@ class GPTQModel:
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
+            layers_node_user: Optional[List[str]] = None,
             **kwargs,
     ):
         if isinstance(model_id_or_path, str):
@@ -262,6 +263,7 @@ class GPTQModel:
                 backend=backend,
                 trust_remote_code=trust_remote_code,
                 verify_hash=verify_hash,
+                layers_node_user=layers_node_user,
                 **kwargs,
             )
         else:

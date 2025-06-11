@@ -2,6 +2,9 @@
 import sys
 # 将本地路径插入到 sys.path 的最前面
 sys.path.insert(0, '/nas/yuehu/NEW/GPTQModel_Qwen')
+import argparse
+
+from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 
 import gptqmodel
 import shutil
@@ -13,15 +16,8 @@ from gptqmodel import GPTQModel, QuantizeConfig
 from transformers import AutoProcessor
 from qwen_omni_utils import process_mm_info
 import soundfile as sf
-
 import torch
-
 import os 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
-import json
-import os
-
 import json
 def process_json_file(json_path, audio_data_path, n_sample):
     result = []
@@ -129,19 +125,47 @@ def prepare_dataset(n_sample: int = 8, data_type: str = 'text-image') -> list[li
 
 
 
-def quantize(model_path, quant_path):
+def quantize(model_path, quant_path, layers_to_convert):
 
     # calibration_dataset = load_dataset(
     #     "wikitext",
     #     "wikitext-2-raw-v1",
     #     split="train"
     # ).select(range(1024))["text"]
-    calibration_dataset = prepare_dataset(data_type='audio')
+    calibration_dataset = prepare_dataset(n_sample=1)
     
     quant_config = QuantizeConfig(bits=4, group_size=128)
 
     model = GPTQModel.load(model_path, quant_config)
 
+    layers_node = []
+    layers_modules_tree = []
+    if 'thinker' in layers_to_convert:
+        layers_node.append("thinker.model.layers")
+        layers_modules_tree.append([
+        "thinker",
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "mlp": ("up_proj", "gate_proj", "down_proj"),
+        }
+        ])
+    if 'talker' in layers_to_convert:
+        layers_node.append("talker.model.layers")
+        layers_modules_tree.append([
+        "talker",
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "mlp": ("up_proj", "gate_proj", "down_proj"),
+        }
+        ])
+    model.layers_node = layers_node
+    model.layers_modules_tree = layers_modules_tree
     # increase `batch_size` to match gpu/vram specs to speed up quantization
     model.quantize(calibration_dataset, batch_size=4)
 
@@ -150,15 +174,22 @@ def quantize(model_path, quant_path):
     spk_dict_path = model_path + '/spk_dict.pt'
     shutil.copy(spk_dict_path, quant_path)     
 
-def inference(quant_path):
+def inference(quant_path, post_fix, layers_to_convert):
     device = 'cuda:0'
+
+    layers_node = []
+    if 'thinker' in layers_to_convert:
+        layers_node.append("thinker.model.layers")
+    if 'talker' in layers_to_convert:
+        layers_node.append("talker.model.layers")
+            
     model = GPTQModel.load(quant_path,   
-        attn_implementation="flash_attention_2")
+        attn_implementation="flash_attention_2", layers_node_user=layers_node)
     processor = AutoProcessor.from_pretrained(quant_path)
     
     spk_path = quant_path + '/spk_dict.pt'
     model.model.load_speakers(spk_path)
-    
+        
     messages = [
         {
             "role": "system",
@@ -199,7 +230,7 @@ def inference(quant_path):
         with torch.no_grad():
             text_ids, audio = model.generate(**inputs, use_audio_in_video=USE_AUDIO_IN_VIDEO, max_new_tokens=512, return_audio = True)
         sf.write(
-            "output_awq_int4.wav",
+            f"output_{post_fix}.wav",
             audio.reshape(-1).detach().cpu().numpy(),
             samplerate=24000,
         )
@@ -212,12 +243,53 @@ def inference(quant_path):
     
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Quantize a model with specified parameters.")
 
-    model_path = '/nas/yuehu/models/omni/Qwen2.5-Omni-3B'
-    quant_path = '/nas/yuehu/models/omni/Qwen2.5-Omni-3B-GPTQ-audio'
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        required=True,
+        help="Path to the original model."
+    )
+    parser.add_argument(
+        "--cuda_device",
+        type=str,
+        default='0', # Default to '0' if not specified
+        help="CUDA device to use (e.g., '0', '1')."
+    )
+    parser.add_argument(
+        "--quant_type",
+        type=str,
+        choices=['thinker-talker', 'thinker-only', 'talker-only'],
+        required=True,
+        help="Type of quantization: 'thinker-talker', 'thinker-only', or 'talker-only'."
+    )
+
+    args = parser.parse_args()
+
+    # Automatically construct quant_path based on model_path and quant_type
+    model_base_name = os.path.basename(args.model_path)
+    model_dir = os.path.dirname(args.model_path)
     
-    # quantize(model_path, quant_path)
+    if args.quant_type == 'thinker-talker':
+        quant_suffix = 'GPTQ-thinker-talker'
+        layers_to_convert = ['thinker', 'talker']
+    elif args.quant_type == 'thinker-only':
+        quant_suffix = 'GPTQ-thinker-only'
+        layers_to_convert = ['thinker']
+    elif args.quant_type == 'talker-only':
+        quant_suffix = 'GPTQ-talker-only'
+        layers_to_convert = ['talker']
+    else:
+        # This case should ideally not be reached due to 'choices' in argparse
+        raise ValueError("Invalid quant_type specified.")
 
-    inference(quant_path)
+    quant_path = os.path.join(model_dir, f"{model_base_name}-{quant_suffix}")
+
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.cuda_device
+    
+    quantize(model_path=args.model_path, quant_path=quant_path, layers_to_convert=layers_to_convert)
+
+    inference(quant_path, quant_suffix, layers_to_convert=layers_to_convert)
 
 

@@ -34,6 +34,7 @@ class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
     # lm_head is not quantized
     pre_lm_head_norm_module = "talker.model.norm"
 
+    # layers_node = ["thinker.model.layers"]
     layers_node = ["thinker.model.layers", "talker.model.layers"]
 
     layer_modules = [
@@ -43,6 +44,17 @@ class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
         ["mlp.down_proj"],
     ]
 
+    #layers_modules_tree = [[
+    #    "thinker",
+    #    "model",
+    #    "layers",
+    #    "#",
+    #    {
+    #        "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+    #        "mlp": ("up_proj", "gate_proj", "down_proj"),
+    #    }
+    #]]
+    
     layers_modules_tree = [[
         "thinker",
         "model",
@@ -114,7 +126,7 @@ class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
         self.move_model_to_device(self.model, self.quantize_config.device)
     def pre_quantize_generate_hook_end(self):
         self.move_model_to_device(self.model, CPU)
-       
+
     @staticmethod
     def process_vision_info(
             conversations: list[dict] | list[list[dict]],

@@ -257,10 +257,15 @@ def ModelLoader(cls):
             torch_dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             verify_hash: Optional[Union[str, List[str]]] = None,
+            layers_node_user: Optional[List[str]] = None,
             **kwargs,
     ):
         # normalized device + device_map into single device
         device = normalize_device_device_map(device, device_map)
+
+        if layers_node_user is None:
+            print('please check your code !!!!')
+            exit(0)
 
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
@@ -487,7 +492,7 @@ def ModelLoader(cls):
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
 
-                if not any(name.startswith(prefix) for prefix in cls.layers_node) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                if not any(name.startswith(prefix) for prefix in layers_node_user) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
                         not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
                 ):
                     # log non-lm-head quantized modules only

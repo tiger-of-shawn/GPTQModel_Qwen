@@ -167,6 +167,7 @@ class ModuleLooper():
         
         module_index = 0
         module_count = len(self.gptq_model.layers_node)
+        print(f'module_count:----->>>>>  {module_count}')
         for layers_node in self.gptq_model.layers_node:
             layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, layers_node)
             for p_index, processor in enumerate(self.processors):
@@ -267,7 +268,6 @@ class ModuleLooper():
                             # some modules have layer_modules that are dynamic based on config
                             # ref: deepseek v2/v3/r1
                             elif self.gptq_model.layer_modules_strict:
-                                import pdb;pdb.set_trace()
                                 raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
 
                         skipped_modules = []
@@ -537,7 +537,7 @@ class ModuleLooper():
                     log.info(module_log)
                 reverse_p.log_plotly()
 
-                if module_index == 1:
+                if module_index == (module_count - 1):
                     reverse_p.finalize(model=self.gptq_model, **kwargs)
 
             self.gptq_model.model.config.use_cache = forward_pass_use_cache
