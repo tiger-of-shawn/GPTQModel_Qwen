@@ -15,8 +15,10 @@ from funasr import AutoModel
 punctuation_all = punctuation + string.punctuation
 
 wav_res_text_path = sys.argv[1]
+# wav_path = f'output/seed_tts_eval_hard'
 wav_path = sys.argv[2]
 lang = sys.argv[3]  # zh or en
+lang = 'zh'
 device = "cuda:0"
 
 

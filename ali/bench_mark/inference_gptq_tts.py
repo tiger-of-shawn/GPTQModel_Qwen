@@ -3,6 +3,11 @@ from typing import Any, Dict
 import sys
 # 将本地路径插入到 sys.path 的最前面
 sys.path.insert(0, '/nas/yuehu/NEW/GPTQModel_Qwen')
+import os
+import argparse
+from functools import partial
+from tts import tts as _tts
+import soundfile as sf
 
 from transformers import (
     Qwen2_5OmniForConditionalGeneration, 
@@ -27,8 +32,10 @@ USE_AUDIO_IN_VIDEO = False
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input-file")
-parser.add_argument("--output-file")
-parser.add_argument("--model_path")
+parser.add_argument("--output_path")
+parser.add_argument("--model-path")
+parser.add_argument("--start-index", default=-1, type=int)
+parser.add_argument("--end-index", default=99999999, type=int)
 parser.add_argument("--batch-size", default=4, type=int)
 args = parser.parse_args()
 
@@ -64,47 +71,21 @@ else:
 from qwen_omni_utils import process_mm_info
 processor = Qwen2_5OmniProcessor.from_pretrained(model_path)
 
-with open(args.input_file) as f, open(args.output_file, "w") as fw:
-    for lines in batched(f, args.batch_size):
-        datas = [json.loads(line) for line in lines]
+tts = partial(_tts, model=model, processor=processor, speaker="Chelsie")
 
-        conversations = [data["prompt"] for data in datas]
-
-        text = processor.apply_chat_template(
-            conversations,
-            add_generation_prompt=True,
-            tokenize=False,
-        )
-        audios, images, videos = process_mm_info(
-            conversations, use_audio_in_video=USE_AUDIO_IN_VIDEO
-        )
-
-        inputs = processor(
-            text=text,
-            audio=audios,
-            images=images,
-            videos=videos,
-            return_tensors="pt",
-            padding=True,
-            use_audio_in_video=USE_AUDIO_IN_VIDEO,
-        )
-        inputs = inputs.to(model.device).to(model.dtype)
-        text_ids = model.generate(
-            **inputs,
-            use_audio_in_video=USE_AUDIO_IN_VIDEO,
-            thinker_do_sample=False,
-            return_audio=False,
-            repetition_penalty=1.0,
-        )
-        generated_ids_list = [
-            text_ids[i][len(inputs["input_ids"][i]) :] for i in range(len(datas))
-        ]
-        response_text = processor.batch_decode(
-            generated_ids_list,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-
-        for data, response in zip(datas, response_text):
-            fw.write(json.dumps(data | {"response": response}) + "\n")
-            fw.flush()
+os.makedirs(args.output_path, exist_ok=True)
+index = 0
+with open(args.input_file) as f:
+    for line in f:
+        if index in range(args.start_index, args.end_index):
+            data = json.loads(line)
+            text = data["gt"]
+            
+            audio = tts(text=text)
+            sf.write(
+                os.path.join(args.output_path, f"{data['id']}.wav"),
+                audio.reshape(-1).detach().cpu().numpy(),
+                samplerate=24000,
+            )
+            print(f'inference index: {index}')
+        index += 1

@@ -35,50 +35,40 @@ def run_benchmark(input_file: str, output_file: str, calc_script: str, batch_siz
     print(f"--- 开始处理 {benchmark_base_name} (批处理大小: {batch_size}) inference_script:  {inference_script}---")
     print(f"日志将保存到: {log_file_path}")
 
-    # --- 优化点 1: 预处理输出文件 ---
-    if os.path.exists(output_file):
-        print(f"检测到旧的输出文件 '{output_file}'，正在删除...")
-        try:
-            os.remove(output_file)
-            print("旧文件删除成功。")
-        except OSError as e:
-            print(f"错误: 无法删除旧文件 '{output_file}': {e}")
-            sys.exit(1)
-
     # 打开日志文件，用于重定向标准输出和标准错误
     with open(log_file_path, 'w') as log_f:
-        # 构建推理命令
-        inference_command = [
-            "python", inference_script,
-            "--input-file", input_file,
-            "--output-file", output_file,
-            "--batch-size", str(batch_size),
-            "--model_path", model_path
-        ]
-
-        try:
-            # 执行推理脚本，并将其输出重定向到日志文件
-            print(f"正在执行推理命令: {' '.join(inference_command)}")
-            subprocess.run(inference_command, check=True, text=True, stdout=log_f, stderr=log_f)
-            print(f"推理成功: {input_file}")
-        except subprocess.CalledProcessError as e:
-            print(f"错误: 推理失败 ({input_file}). 详细信息请查看日志文件: {log_file_path}")
-            # 由于 stdout/stderr 已重定向到文件，这里不打印 e.stdout/e.stderr
-            sys.exit(1)
-
-        # # 构建计算命令
-        # calc_command = [
-        #     "python", calc_script, output_file
+        # # 构建推理命令
+        # inference_command = [
+        #     "python", inference_script,
+        #     "--input-file", input_file,
+        #     "--output-file", output_file,
+        #     "--batch-size", str(batch_size),
+        #     "--model_path", model_path
         # ]
 
         # try:
-        #     # 执行计算脚本，并将其输出重定向到日志文件
-        #     print(f"正在执行计算命令: {' '.join(calc_command)}")
-        #     subprocess.run(calc_command, check=True, text=True, stdout=log_f, stderr=log_f)
-        #     print(f"计算成功: {output_file}")
+        #     # 执行推理脚本，并将其输出重定向到日志文件
+        #     print(f"正在执行推理命令: {' '.join(inference_command)}")
+        #     subprocess.run(inference_command, check=True, text=True, stdout=log_f, stderr=log_f)
+        #     print(f"推理成功: {input_file}")
         # except subprocess.CalledProcessError as e:
-        #     print(f"错误: 计算失败 ({output_file}). 详细信息请查看日志文件: {log_file_path}")
+        #     print(f"错误: 推理失败 ({input_file}). 详细信息请查看日志文件: {log_file_path}")
+        #     # 由于 stdout/stderr 已重定向到文件，这里不打印 e.stdout/e.stderr
         #     sys.exit(1)
+
+        # 构建计算命令
+        calc_command = [
+            "python", calc_script, output_file
+        ]
+
+        try:
+            # 执行计算脚本，并将其输出重定向到日志文件
+            print(f"正在执行计算命令: {' '.join(calc_command)}")
+            subprocess.run(calc_command, check=True, text=True, stdout=log_f, stderr=log_f)
+            print(f"计算成功: {output_file}")
+        except subprocess.CalledProcessError as e:
+            print(f"错误: 计算失败 ({output_file}). 详细信息请查看日志文件: {log_file_path}")
+            
 
     print(f"--- 完成处理 {benchmark_base_name} ---")
     print("-" * 50) # 添加分隔线增加可读性
@@ -103,18 +93,18 @@ BENCHMARKS = [
         "calc_script": "cal_wer.py",
         "batch_size": 4
     },
-    #{
-    #    "input_file": "data/jsonls/mmlu_pro.jsonl",
-    #    "output_file": "output/mmlu_pro.jsonl",
-    #    "calc_script": "cal_mmlu.py",
-    #    "batch_size": 4
-    #},
-    #{
-    #    "input_file": "data/jsonls/videomme_50.jsonl",
-    #    "output_file": "output/videomme_50.jsonl",
-    #    "calc_script": "cal_vidmme.py",
-    #    "batch_size": 1
-    #}
+    {
+       "input_file": "data/jsonls/mmlu_pro.jsonl",
+       "output_file": "output/mmlu_pro.jsonl",
+       "calc_script": "cal_mmlu.py",
+       "batch_size": 4
+    },
+    {
+       "input_file": "data/jsonls/videomme_50.jsonl",
+       "output_file": "output/videomme_50.jsonl",
+       "calc_script": "cal_vidmme.py",
+       "batch_size": 1
+    }
 ]
 
 # --- 主执行逻辑 ---
