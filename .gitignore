@@ -2,7 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.wav
 # C extensions
 *.so
 
@@ -168,4 +168,5 @@ debug
 # .vscode
 .vscode/
 
+*.jsonl*
 example.py

@@ -125,14 +125,14 @@ def prepare_dataset(n_sample: int = 8, data_type: str = 'text-image') -> list[li
 
 
 
-def quantize(model_path, quant_path, layers_to_convert):
+def quantize(model_path, quant_path, layers_to_convert, n_samples=8):
 
     # calibration_dataset = load_dataset(
     #     "wikitext",
     #     "wikitext-2-raw-v1",
     #     split="train"
     # ).select(range(1024))["text"]
-    calibration_dataset = prepare_dataset(n_sample=1)
+    calibration_dataset = prepare_dataset(n_sample=n_samples)
     
     quant_config = QuantizeConfig(bits=4, group_size=128)
 
@@ -264,7 +264,12 @@ if __name__ == "__main__":
         required=True,
         help="Type of quantization: 'thinker-talker', 'thinker-only', or 'talker-only'."
     )
-
+    parser.add_argument(
+        "--dataset_count",
+        type=int,
+        default=8,
+        help="采用几条数据集进行量化"
+    )
     args = parser.parse_args()
 
     # Automatically construct quant_path based on model_path and quant_type
@@ -284,12 +289,11 @@ if __name__ == "__main__":
         # This case should ideally not be reached due to 'choices' in argparse
         raise ValueError("Invalid quant_type specified.")
 
-    quant_path = os.path.join(model_dir, f"{model_base_name}-{quant_suffix}")
+    quant_path = os.path.join(model_dir, f"{model_base_name}-{quant_suffix}-text-image-pair-{args.dataset_count}")
+    print(f'quant_path:  {quant_path}')
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.cuda_device
     
-    quantize(model_path=args.model_path, quant_path=quant_path, layers_to_convert=layers_to_convert)
+    quantize(model_path=args.model_path, quant_path=quant_path, layers_to_convert=layers_to_convert, n_samples=args.dataset_count)
 
     inference(quant_path, quant_suffix, layers_to_convert=layers_to_convert)
-
-
