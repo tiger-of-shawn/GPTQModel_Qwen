@@ -69,13 +69,12 @@ class ModuleLooper():
                     layer_input.append(move_to(kwargs["hidden_states"], device=data_device))
 
             layer_inputs.append(layer_input)
-
             # Keyword arguments.
-            if kwargs.get("attention_mask") is not None and str(type(module)) != "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
-                attention_masks.append(kwargs["attention_mask"].to(device=data_device))
-            else:
+            if module.__class__.__name__ == 'Qwen3OmniThinkerTextDecoderLayer' or module.__class__.__name__ == 'Qwen2_5OmniThinkerTextDecoderLayer' or module.__class__.__name__ == 'Qwen3OmniTalkerDecoderLayer':
                 attention_masks.append(None)
-
+            else:
+                attention_masks.append(kwargs.get("attention_mask", None).to(device=data_device))
+            
             pos_ids = kwargs.get("position_ids", None)
             if pos_ids is not None:
                 position_ids.append(move_to(pos_ids, device=data_device))
@@ -105,7 +104,7 @@ class ModuleLooper():
         self.gptq_model.pre_quantize_generate_hook_start()
         for example in calibration_data:
             for k, v in example.items():
-                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
+                if self.gptq_model.__class__.__name__ == 'Qwen3_OmniGPTQ' or self.gptq_model.__class__.__name__ == 'Qwen2_5_OmniGPTQ':
                     data_device = self.gptq_model.quantize_config.device
                 else:
                     data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
@@ -120,9 +119,8 @@ class ModuleLooper():
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, device=data_device)
             try:
-                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
+                if self.gptq_model.model.__class__.__name__ == 'Qwen3OmniForConditionalGeneration' or self.gptq_model.model.__class__.__name__ == 'Qwen2_5OmniForConditionalGeneration':
                     self.gptq_model.model.generate(**example, return_audio=True)
-                    
                 else:
                     self.gptq_model.model(**example)
             except ValueError:
@@ -341,6 +339,22 @@ class ModuleLooper():
                             # sync above stream copies
                             #torch_sync(device=cur_layer_device)
 
+                            # print(f'layer_input shape: {layer_input[0].shape}')
+                            # from collections.abc import Sized # 用于检查对象是否有 len()
+                            # for key, value in additional_layer_inputs.items():
+                            #     # 检查 value 是否是张量 (或您期望的类型)
+                            #     if isinstance(value, torch.Tensor):
+                            #         print(f"Key: {key}, Shape: {value.shape}")
+                            #     elif hasattr(value, 'shape'):
+                            #         # 适用于 NumPy 数组等具有 .shape 属性的对象
+                            #         print(f"Key: {key}, Shape: {value.shape}")
+                            #     elif isinstance(value, Sized):
+                            #         # 如果是列表、元组等可迭代对象，打印长度
+                            #         print(f"Key: {key}, Type: {type(value).__name__}, Length: {len(value)}")
+                            #     else:
+                            #         # 否则，只打印键和对象的类型
+                            #         print(f"Key: {key}, Type: {type(value).__name__} (Skipped .shape)")
+
                             # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                             if hasattr(module, "reuse_kv"):
                                 if module.reuse_kv:
@@ -353,7 +367,8 @@ class ModuleLooper():
                                     shared_kv_cache_dict[layer_index] = layer_output[-1]
                             else:
                                 layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
-                                                                                    **additional_layer_inputs)
+                                                                                    **additional_layer_inputs)  
+
                             # For Native processor, we can update processor input here
                             # if second forward is not required, this/first forward output is captured as input for next loop
                             if not processor.fwd_after_process:
@@ -469,14 +484,21 @@ class ModuleLooper():
                             if hasattr(module, "reuse_kv"):
                                 if module.reuse_kv:
                                     additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
-
                             # log.info(f"MODULE Last forward: {module}")
-                            layer_output = move_to(
-                                module(*layer_input)[0] if is_lm_head_module else
-                                module(*layer_input, **additional_layer_inputs)[0],
-                                device=cur_layer_device if calibration_enable_gpu_cache else CPU,
-                                # stream=True,
-                            )
+                            if module.__class__.__name__ == 'Qwen3OmniThinkerTextDecoderLayer' or module.__class__.__name__ == 'Qwen3OmniTalkerDecoderLayer':
+                                layer_output = move_to(
+                                    module(*layer_input) if is_lm_head_module else
+                                    module(*layer_input, **additional_layer_inputs),
+                                    device=cur_layer_device if calibration_enable_gpu_cache else CPU,
+                                    # stream=True,
+                                )
+                            else:
+                                layer_output = move_to(
+                                    module(*layer_input)[0] if is_lm_head_module else
+                                    module(*layer_input, **additional_layer_inputs)[0],
+                                    device=cur_layer_device if calibration_enable_gpu_cache else CPU,
+                                    # stream=True,
+                                )                                
 
                             layer_outputs.append([layer_output])
 
